@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -91,67 +93,72 @@ async def create_movie(
         movie: MovieCreate,
         db: AsyncSession = Depends(get_db)
 ):
-    duplicate_query = select(MovieModel).where(
-        MovieModel.name == movie.name,
-        MovieModel.date == movie.date
-    )
-    result = await db.execute(duplicate_query)
-    existing_movie = result.scalar_one_or_none()
+    try:
+        duplicate_query = select(MovieModel).where(
+            MovieModel.name == movie.name,
+            MovieModel.date == movie.date
+        )
+        result = await db.execute(duplicate_query)
+        existing_movie = result.scalar_one_or_none()
 
-    if existing_movie:
+        if existing_movie:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A movie with the name '{movie.name}' "
+                       f"and release date '{movie.date}' already exists."
+            )
+
+        country_query = select(CountryModel).where(
+            CountryModel.code == movie.country
+        )
+
+        result = await db.execute(country_query)
+        country = result.scalar_one_or_none()
+
+        if not country:
+            country = CountryModel(code=movie.country, name=None)
+            db.add(country)
+            await db.flush()
+
+        genres = await get_or_create_entities(db, GenreModel, movie.genres)
+        actors = await get_or_create_entities(db, ActorModel, movie.actors)
+        languages = await get_or_create_entities(db, LanguageModel, movie.languages)
+
+        new_movie = MovieModel(
+            name=movie.name,
+            date=movie.date,
+            score=movie.score,
+            overview=movie.overview,
+            status=movie.status,
+            budget=movie.budget,
+            revenue=movie.revenue,
+            country_id=country.id,
+            genres=genres,
+            actors=actors,
+            languages=languages
+        )
+
+        db.add(new_movie)
+        await db.commit()
+
+        query = (
+            select(MovieModel)
+            .options(
+                selectinload(MovieModel.country),
+                selectinload(MovieModel.genres),
+                selectinload(MovieModel.actors),
+                selectinload(MovieModel.languages)
+            )
+            .where(MovieModel.id == new_movie.id)
+        )
+        result = await db.execute(query)
+        return result.scalar_one()
+
+    except RequestValidationError:
         raise HTTPException(
-            status_code=409,
-            detail=f"A movie with the name '{movie.name}' "
-                   f"and release date '{movie.date}' already exists."
+            status_code=400,
+            detail="Invalid input data."
         )
-
-    country_query = (
-        select(CountryModel)
-        .where(CountryModel.code == movie.country)
-    )
-    result = await db.execute(country_query)
-    country = result.scalar_one_or_none()
-
-    if not country:
-        country = CountryModel(code=movie.country, name=None)
-        db.add(country)
-        await db.flush()
-
-    genres = await get_or_create_entities(db, GenreModel, movie.genres)
-    actors = await get_or_create_entities(db, ActorModel, movie.actors)
-    languages = await get_or_create_entities(db, LanguageModel, movie.languages)
-
-    new_movie = MovieModel(
-        name=movie.name,
-        date=movie.date,
-        score=movie.score,
-        overview=movie.overview,
-        status=movie.status,
-        budget=movie.budget,
-        revenue=movie.revenue,
-        country_id=country.id,
-        genres=genres,
-        actors=actors,
-        languages=languages
-    )
-
-    db.add(new_movie)
-    await db.commit()
-
-    query = (
-        select(MovieModel)
-        .options(
-            selectinload(MovieModel.country),
-            selectinload(MovieModel.genres),
-            selectinload(MovieModel.actors),
-            selectinload(MovieModel.languages)
-        )
-        .where(MovieModel.id == new_movie.id)
-    )
-    result = await db.execute(query)
-    created_movie = result.scalar_one()
-
-    return created_movie
 
 
 @router.get("/{movie_id}/", response_model=MovieResponse)
@@ -202,21 +209,28 @@ async def update_movie(
         movie_update: MovieUpdate,
         db: AsyncSession = Depends(get_db)
 ):
-    query = select(MovieModel).where(MovieModel.id == movie_id)
-    result = await db.execute(query)
-    movie = result.scalar_one_or_none()
+    try:
+        query = select(MovieModel).where(MovieModel.id == movie_id)
+        result = await db.execute(query)
+        movie = result.scalar_one_or_none()
 
-    if not movie:
+        if not movie:
+            raise HTTPException(
+                status_code=404,
+                detail="Movie with the given ID was not found."
+            )
+
+        update_data = movie_update.model_dump(exclude_unset=True)
+
+        for field, value in update_data.items():
+            setattr(movie, field, value)
+
+        await db.commit()
+
+        return {"detail": "Movie updated successfully."}
+
+    except RequestValidationError:
         raise HTTPException(
-            status_code=404,
-            detail="Movie with the given ID was not found."
+            status_code=400,
+            detail="Invalid input data."
         )
-
-    update_data = movie_update.model_dump(exclude_unset=True)
-
-    for field, value in update_data.items():
-        setattr(movie, field, value)
-
-    await db.commit()
-
-    return {"detail": "Movie updated successfully."}

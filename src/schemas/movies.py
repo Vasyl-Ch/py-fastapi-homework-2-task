@@ -8,7 +8,7 @@ from datetime import date, timedelta
 
 
 class MovieCreate(BaseModel):
-    name: str
+    name: str = Field(max_length=255)
     date: date
     score: float = Field(ge=0, le=100)
     overview: str
